@@ -1,0 +1,777 @@
+// ==UserScript==
+// @name         EURIKA Surveys Automated v1.2
+// @namespace    http://tampermonkey.net/
+// @version      2026-07-11
+// @description  Two‑step survey selector + auto‑filler (logic + web search)
+// @author       You
+// @match        https://eurekasurveys.com/surveys*
+// @match        https://eurekasurveys.com/survey*
+// @icon         https://www.google.com/s2/favicons?domain=eurekasurveys.com
+// @grant        GM_xmlhttpRequest
+// @grant        GM_notification
+// @run-at       document-end
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    // ---- CONFIG ----
+    const MC_DELAY_MIN = 1000;
+    const MC_DELAY_MAX = 2000;
+    const TEXT_DELAY_MIN = 2000;
+    const TEXT_DELAY_MAX = 3000;
+    const SEARCH_TIMEOUT = 5000;
+    const RANDOM_FALLBACK = true;
+
+    // ---- STATE ----
+    let isRunning = false;
+    let stopRequested = false;
+    let currentQuestionCount = 0;
+
+    // ---- HELPERS (same as before) ----
+    function clean(text) {
+        return text ? text.replace(/\s+/g, ' ').trim() : '';
+    }
+
+    function getQuestionText(fieldset) {
+        const legend = fieldset.querySelector('legend.question, .question-text, .q-title');
+        if (legend) return clean(legend.textContent);
+        const p = fieldset.querySelector('p:first-child');
+        return p ? clean(p.textContent) : '';
+    }
+
+    function getOptionLabels(fieldset) {
+        const labels = [];
+        fieldset.querySelectorAll('.radio__label, label').forEach(lbl => {
+            const txt = clean(lbl.textContent);
+            if (txt) labels.push(txt);
+        });
+        return labels;
+    }
+
+    function getInputType(fieldset) {
+        if (fieldset.querySelector('input[type="radio"]')) return 'radio';
+        if (fieldset.querySelector('input[type="checkbox"]')) return 'checkbox';
+        if (fieldset.querySelector('input[type="text"], textarea')) return 'text';
+        if (fieldset.querySelector('select')) return 'select';
+        return 'unknown';
+    }
+
+    function localLogic(question, options) {
+        const lower = question.toLowerCase();
+        const patterns = [
+            /select ['"“]([^'"]+)['"”]/i,
+            /choose ['"“]([^'"]+)['"”]/i,
+            /pick ['"“]([^'"]+)['"”]/i,
+        ];
+        for (let p of patterns) {
+            const m = question.match(p);
+            if (m) {
+                const target = m[1].toLowerCase().trim();
+                for (let opt of options) {
+                    if (opt.toLowerCase().includes(target) || target.includes(opt.toLowerCase().slice(0, 10))) {
+                        return { type: 'radio', selection: opt };
+                    }
+                }
+            }
+        }
+        const math = lower.match(/(\d+)\s*([+\-*/])\s*(\d+)/);
+        if (math) {
+            const a = parseInt(math[1]), b = parseInt(math[3]);
+            let res;
+            switch (math[2]) {
+                case '+': res = a + b; break;
+                case '-': res = a - b; break;
+                case '*': res = a * b; break;
+                case '/': res = Math.round((a / b) * 100) / 100; break;
+            }
+            if (res !== undefined) {
+                const str = res.toString();
+                for (let opt of options) {
+                    if (opt.includes(str)) return { type: 'radio', selection: opt };
+                }
+            }
+        }
+        const facts = {
+            'capital of france': 'Paris',
+            'capital of germany': 'Berlin',
+            '2+2': '4',
+        };
+        for (let [key, val] of Object.entries(facts)) {
+            if (lower.includes(key)) {
+                for (let opt of options) {
+                    if (opt.toLowerCase().includes(val.toLowerCase())) {
+                        return { type: 'radio', selection: opt };
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    function webSearch(query) {
+        return new Promise((resolve, reject) => {
+            const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                timeout: SEARCH_TIMEOUT,
+                onload: function(response) {
+                    try {
+                        const data = JSON.parse(response.responseText);
+                        let answer = data.AbstractText || '';
+                        if (!answer && data.RelatedTopics && data.RelatedTopics.length) {
+                            answer = data.RelatedTopics[0].Text || '';
+                        }
+                        resolve(clean(answer));
+                    } catch (e) {
+                        reject(e);
+                    }
+                },
+                onerror: reject,
+                ontimeout: reject
+            });
+        });
+    }
+
+    async function getLogicalAnswer(question, options, inputType) {
+        const local = localLogic(question, options);
+        if (local) return local;
+
+        let answer = await webSearch(question).catch(() => null);
+        if (!answer) {
+            if (inputType === 'text') {
+                return { type: 'text', selection: 'Generated response for testing.' };
+            }
+            if (RANDOM_FALLBACK && options.length) {
+                const chosen = options[Math.floor(Math.random() * options.length)];
+                return { type: 'radio', selection: chosen };
+            }
+            return null;
+        }
+
+        if (inputType === 'text') {
+            const sentenceMatch = question.match(/(\d+)\s*sentence/);
+            let sentences = answer.split(/[.!?]+/).filter(s => s.trim().length > 0);
+            if (sentenceMatch) {
+                const count = parseInt(sentenceMatch[1]);
+                answer = sentences.slice(0, count).join('. ') + '.';
+            } else {
+                if (sentences.length > 2) {
+                    answer = sentences.slice(0, 2).join('. ') + '.';
+                }
+            }
+            return { type: 'text', selection: answer };
+        }
+
+        for (let opt of options) {
+            const optClean = opt.toLowerCase();
+            const ansClean = answer.toLowerCase();
+            if (optClean.includes(ansClean) || ansClean.includes(optClean) ||
+                ansClean.split(' ').some(word => optClean.includes(word))) {
+                return { type: 'radio', selection: opt };
+            }
+        }
+        if (RANDOM_FALLBACK && options.length) {
+            const chosen = options[Math.floor(Math.random() * options.length)];
+            return { type: 'radio', selection: chosen };
+        }
+        return null;
+    }
+
+    async function fillQuestion(fieldset) {
+        const qText = getQuestionText(fieldset);
+        const options = getOptionLabels(fieldset);
+        const type = getInputType(fieldset);
+        console.log(`📝 ${qText.slice(0, 70)}...`);
+
+        const result = await getLogicalAnswer(qText, options, type);
+        if (!result) {
+            console.warn('⚠️ No answer found, skipping.');
+            return;
+        }
+
+        if (type === 'radio') {
+            const radios = fieldset.querySelectorAll('input[type="radio"]');
+            for (let i = 0; i < radios.length; i++) {
+                if (options[i] === result.selection) {
+                    radios[i].checked = true;
+                    radios[i].dispatchEvent(new Event('change', { bubbles: true }));
+                    console.log(`   ✅ Selected: "${result.selection}"`);
+                    break;
+                }
+            }
+            const delay = MC_DELAY_MIN + Math.random() * (MC_DELAY_MAX - MC_DELAY_MIN);
+            await new Promise(r => setTimeout(r, delay));
+        } else if (type === 'checkbox') {
+            const checks = fieldset.querySelectorAll('input[type="checkbox"]');
+            const lowerQ = qText.toLowerCase();
+            if (lowerQ.includes('select all') || lowerQ.includes('check all')) {
+                checks.forEach(cb => { cb.checked = true; cb.dispatchEvent(new Event('change', { bubbles: true })); });
+                console.log('   ☑️ Selected all checkboxes');
+            } else {
+                for (let i = 0; i < checks.length; i++) {
+                    if (options[i] === result.selection) {
+                        checks[i].checked = true;
+                        checks[i].dispatchEvent(new Event('change', { bubbles: true }));
+                        console.log(`   ☑️ Selected: "${result.selection}"`);
+                        break;
+                    }
+                }
+            }
+            const delay = MC_DELAY_MIN + Math.random() * (MC_DELAY_MAX - MC_DELAY_MIN);
+            await new Promise(r => setTimeout(r, delay));
+        } else if (type === 'text') {
+            const inputs = fieldset.querySelectorAll('input[type="text"], textarea');
+            const answerText = result.selection;
+            inputs.forEach(inp => {
+                inp.value = answerText;
+                inp.dispatchEvent(new Event('input', { bubbles: true }));
+            });
+            console.log(`   ✏️ Text filled: "${answerText.slice(0, 50)}..."`);
+            const delay = TEXT_DELAY_MIN + Math.random() * (TEXT_DELAY_MAX - TEXT_DELAY_MIN);
+            await new Promise(r => setTimeout(r, delay));
+        } else if (type === 'select') {
+            const selects = fieldset.querySelectorAll('select');
+            selects.forEach(sel => {
+                const opts = sel.querySelectorAll('option');
+                if (opts.length > 1) {
+                    let chosen = null;
+                    for (let opt of opts) {
+                        if (result.selection && opt.textContent.includes(result.selection)) {
+                            chosen = opt;
+                            break;
+                        }
+                    }
+                    if (!chosen) chosen = opts[Math.floor(Math.random() * (opts.length - 1)) + 1];
+                    sel.value = chosen.value;
+                    sel.dispatchEvent(new Event('change', { bubbles: true }));
+                    console.log(`   📋 Selected: "${chosen.textContent.trim()}"`);
+                }
+            });
+            const delay = MC_DELAY_MIN + Math.random() * (MC_DELAY_MAX - MC_DELAY_MIN);
+            await new Promise(r => setTimeout(r, delay));
+        }
+    }
+
+    function clickNext() {
+        const btn = document.querySelector('button#next, button[type="submit"], .next-btn, .continue-btn');
+        if (btn) {
+            btn.click();
+            return true;
+        }
+        return false;
+    }
+
+    function isSurveyComplete() {
+        const fieldset = document.querySelector('fieldset:not([style*="display: none"])');
+        const nextBtn = document.querySelector('button#next, button[type="submit"]');
+        const thankYou = document.querySelector('.thank-you, .completion, .finish-message');
+        if (thankYou && thankYou.textContent.toLowerCase().includes('thank')) return true;
+        if (!fieldset && !nextBtn) return true;
+        return false;
+    }
+
+    // ---- UI CREATION ----
+    function createUI() {
+        const overlay = document.createElement('div');
+        overlay.id = 'eurika-automator';
+        overlay.style.cssText = `
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            z-index: 999999;
+            background: #1e293b;
+            color: #f1f5f9;
+            padding: 16px 20px;
+            border-radius: 12px;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 14px;
+            box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 200px;
+            border: 1px solid #334155;
+            opacity: 1;
+        `;
+
+        // ---- STEP 1 & 2 BUTTONS ----
+        const stepRow = document.createElement('div');
+        stepRow.style.cssText = 'display: flex; gap: 8px; width: 100%;';
+
+        const step1Btn = document.createElement('button');
+        step1Btn.id = 'eurika-step1';
+        step1Btn.textContent = '🔹 Step 1: Select Survey';
+        step1Btn.style.cssText = `
+            background: #8b5cf6;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 12px;
+            flex: 1;
+        `;
+        step1Btn.addEventListener('mouseenter', () => { step1Btn.style.background = '#7c3aed'; });
+        step1Btn.addEventListener('mouseleave', () => { step1Btn.style.background = '#8b5cf6'; });
+
+        const step2Btn = document.createElement('button');
+        step2Btn.id = 'eurika-step2';
+        step2Btn.textContent = '🔸 Step 2: Start Auto-Fill';
+        step2Btn.style.cssText = `
+            background: #64748b;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: not-allowed;
+            font-size: 12px;
+            flex: 1;
+            opacity: 0.6;
+        `;
+        step2Btn.disabled = true;
+
+        stepRow.appendChild(step1Btn);
+        stepRow.appendChild(step2Btn);
+        overlay.appendChild(stepRow);
+
+        // ---- STATUS & SPINNER ----
+        const statusRow = document.createElement('div');
+        statusRow.style.cssText = 'display: flex; align-items: center; gap: 10px; width: 100%;';
+
+        const spinner = document.createElement('div');
+        spinner.id = 'eurika-spinner';
+        spinner.style.cssText = `
+            width: 20px;
+            height: 20px;
+            border: 3px solid #475569;
+            border-top: 3px solid #60a5fa;
+            border-radius: 50%;
+            display: none;
+            animation: eurika-spin 0.8s linear infinite;
+        `;
+
+        const statusText = document.createElement('span');
+        statusText.id = 'eurika-status';
+        statusText.textContent = '⏸️ Idle';
+
+        statusRow.appendChild(spinner);
+        statusRow.appendChild(statusText);
+        overlay.appendChild(statusRow);
+
+        // ---- START/STOP & RESET ----
+        const controlRow = document.createElement('div');
+        controlRow.style.cssText = 'display: flex; gap: 8px; width: 100%;';
+
+        const toggleBtn = document.createElement('button');
+        toggleBtn.id = 'eurika-toggle';
+        toggleBtn.textContent = '▶️ Start';
+        toggleBtn.style.cssText = `
+            background: #3b82f6;
+            color: white;
+            border: none;
+            padding: 6px 16px;
+            border-radius: 6px;
+            font-weight: bold;
+            cursor: pointer;
+            font-size: 13px;
+            flex: 1;
+        `;
+        toggleBtn.addEventListener('mouseenter', () => {
+            toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#2563eb' : '#dc2626';
+        });
+        toggleBtn.addEventListener('mouseleave', () => {
+            toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#3b82f6' : '#ef4444';
+        });
+
+        const resetBtn = document.createElement('button');
+        resetBtn.textContent = '🔄 Reset';
+        resetBtn.style.cssText = `
+            background: #475569;
+            color: white;
+            border: none;
+            padding: 6px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            flex: 0.5;
+        `;
+        resetBtn.addEventListener('mouseenter', () => { resetBtn.style.background = '#64748b'; });
+        resetBtn.addEventListener('mouseleave', () => { resetBtn.style.background = '#475569'; });
+
+        controlRow.appendChild(toggleBtn);
+        controlRow.appendChild(resetBtn);
+        overlay.appendChild(controlRow);
+
+        // ---- COUNTER ----
+        const counter = document.createElement('div');
+        counter.id = 'eurika-counter';
+        counter.style.cssText = 'font-size: 12px; color: #94a3b8; align-self: flex-start;';
+        counter.textContent = 'Questions: 0';
+        overlay.appendChild(counter);
+
+        document.body.appendChild(overlay);
+
+        // ---- CSS for spinner ----
+        if (!document.getElementById('eurika-spin-style')) {
+            const style = document.createElement('style');
+            style.id = 'eurika-spin-style';
+            style.textContent = `
+                @keyframes eurika-spin {
+                    0% { transform: rotate(0deg); }
+                    100% { transform: rotate(360deg); }
+                }
+            `;
+            document.head.appendChild(style);
+        }
+
+        // ---- EVENT HANDLERS ----
+        // Step 1: Select Survey (only on /surveys page)
+        step1Btn.addEventListener('click', function() {
+            if (window.location.pathname.includes('/surveys')) {
+                // Find the chevron arrow
+                const arrow = document.querySelector('img[src*="chevron_right"], svg[src*="chevron_right"]');
+                if (arrow) {
+                    arrow.click();
+                    // Store flag that we've selected a survey
+                    sessionStorage.setItem('eurika_survey_selected', 'true');
+                    // Show a toast
+                    showToast('🔄 Survey selected! Redirecting...', '#8b5cf6');
+                    // The page will redirect; the script will reload.
+                } else {
+                    showToast('❌ Arrow not found on this page.', '#ef4444');
+                }
+            } else {
+                showToast('ℹ️ Please go to the /surveys page first.', '#f59e0b');
+            }
+        });
+
+        // Step 2: Start Auto-Fill (on survey page after step1)
+        step2Btn.addEventListener('click', function() {
+            if (isRunning) {
+                // If already running, do nothing
+                return;
+            }
+            // Start the auto-filler
+            if (window._eurikaRunner && typeof window._eurikaRunner === 'function') {
+                stopRequested = false;
+                isRunning = true;
+                toggleBtn.textContent = '⏹️ Stop';
+                toggleBtn.style.background = '#ef4444';
+                spinner.style.display = 'block';
+                statusText.textContent = '▶️ Running...';
+                window._eurikaRunner();
+            } else {
+                // First run
+                stopRequested = false;
+                isRunning = true;
+                toggleBtn.textContent = '⏹️ Stop';
+                toggleBtn.style.background = '#ef4444';
+                spinner.style.display = 'block';
+                statusText.textContent = '▶️ Running...';
+                runAutoFiller();
+            }
+        });
+
+        // Toggle (Start/Stop) – this will be used for pausing during auto-fill
+        toggleBtn.addEventListener('click', function() {
+            if (isRunning) {
+                // Stop
+                stopRequested = true;
+                toggleBtn.textContent = '⏳ Stopping...';
+                toggleBtn.style.background = '#f59e0b';
+            } else {
+                // Start (only if we're on a survey page and step2 was already activated?)
+                // Actually, the toggle is meant to start/stop the running loop.
+                // We'll check if we are on a survey page and we have a fieldset.
+                const fieldset = document.querySelector('fieldset:not([style*="display: none"])');
+                if (!fieldset) {
+                    showToast('❌ No survey loaded. Use Step 1 & 2 first.', '#ef4444');
+                    return;
+                }
+                stopRequested = false;
+                isRunning = true;
+                toggleBtn.textContent = '⏹️ Stop';
+                toggleBtn.style.background = '#ef4444';
+                spinner.style.display = 'block';
+                statusText.textContent = '▶️ Running...';
+                if (window._eurikaRunner && typeof window._eurikaRunner === 'function') {
+                    window._eurikaRunner();
+                } else {
+                    runAutoFiller();
+                }
+            }
+        });
+
+        // Reset
+        resetBtn.addEventListener('click', function() {
+            // Stop everything, reset counter and UI
+            if (isRunning) {
+                stopRequested = true;
+                // Wait a bit then reset
+                setTimeout(() => resetUI(), 500);
+            } else {
+                resetUI();
+            }
+        });
+
+        function resetUI() {
+            isRunning = false;
+            stopRequested = false;
+            currentQuestionCount = 0;
+            toggleBtn.textContent = '▶️ Start';
+            toggleBtn.style.background = '#3b82f6';
+            spinner.style.display = 'none';
+            statusText.textContent = '⏸️ Idle';
+            counter.textContent = 'Questions: 0';
+            // Reset step2 button to disabled if not on survey page? We'll keep it as is.
+            // Also clear session flag? Not needed, but we can if user wants.
+            delete window._eurikaRunner;
+            // Also maybe reload? No.
+        }
+
+        // ---- TOAST FUNCTION ----
+        function showToast(message, color = '#22c55e') {
+            const toast = document.createElement('div');
+            toast.style.cssText = `
+                position: fixed;
+                top: 20px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: ${color};
+                color: white;
+                padding: 12px 24px;
+                border-radius: 8px;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 16px;
+                font-weight: bold;
+                z-index: 999999;
+                box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+                opacity: 0;
+                transition: opacity 0.5s;
+            `;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            requestAnimationFrame(() => { toast.style.opacity = '1'; });
+            setTimeout(() => {
+                toast.style.opacity = '0';
+                setTimeout(() => toast.remove(), 500);
+            }, 4000);
+        }
+
+        // Expose functions globally for debugging
+        window._eurikaUI = { toggleBtn, statusText, spinner, counter, step1Btn, step2Btn, resetUI, showToast };
+
+        // ---- INITIAL STATE BASED ON PAGE ----
+        const currentPath = window.location.pathname;
+        if (currentPath.includes('/surveys')) {
+            // On survey list page: enable step1, disable step2, hide toggle? we keep toggle but disabled?
+            step2Btn.disabled = true;
+            step2Btn.style.cursor = 'not-allowed';
+            step2Btn.style.opacity = '0.6';
+            statusText.textContent = '📋 Select a survey';
+            // Hide the toggle button? we can keep it but grayed out.
+            toggleBtn.disabled = true;
+            toggleBtn.style.opacity = '0.5';
+            toggleBtn.style.cursor = 'not-allowed';
+            // Also hide spinner
+            spinner.style.display = 'none';
+        } else if (currentPath.includes('/survey')) {
+            // On survey page: check if we have the flag
+            const flag = sessionStorage.getItem('eurika_survey_selected');
+            if (flag === 'true') {
+                // Enable step2, disable step1
+                step1Btn.disabled = true;
+                step1Btn.style.opacity = '0.5';
+                step1Btn.style.cursor = 'not-allowed';
+                step2Btn.disabled = false;
+                step2Btn.style.cursor = 'pointer';
+                step2Btn.style.opacity = '1';
+                step2Btn.style.background = '#22c55e';
+                statusText.textContent = '✅ Survey ready – click Step 2';
+                // Enable toggle
+                toggleBtn.disabled = false;
+                toggleBtn.style.opacity = '1';
+                toggleBtn.style.cursor = 'pointer';
+                // Clear flag after use? We'll keep it for this session.
+                // Optionally auto-start step2? But user wants button.
+            } else {
+                // No flag: maybe user arrived directly
+                step1Btn.disabled = true;
+                step1Btn.style.opacity = '0.5';
+                step1Btn.style.cursor = 'not-allowed';
+                step2Btn.disabled = true;
+                step2Btn.style.opacity = '0.5';
+                step2Btn.style.cursor = 'not-allowed';
+                toggleBtn.disabled = true;
+                toggleBtn.style.opacity = '0.5';
+                toggleBtn.style.cursor = 'not-allowed';
+                statusText.textContent = '⚠️ Please use Step 1 first';
+                showToast('⚠️ Go to /surveys and use "Step 1" first.', '#f59e0b');
+            }
+        }
+
+        return { step1Btn, step2Btn, toggleBtn, statusText, spinner, counter };
+    }
+
+    // ---- MAIN AUTO-FILLER LOOP (stoppable) ----
+    async function runAutoFiller() {
+        if (window._eurikaRunner) return;
+
+        window._eurikaRunner = async function() {
+            if (!isRunning || stopRequested) {
+                isRunning = false;
+                const toggle = document.getElementById('eurika-toggle');
+                if (toggle) {
+                    toggle.textContent = '▶️ Start';
+                    toggle.style.background = '#3b82f6';
+                }
+                const spinner = document.getElementById('eurika-spinner');
+                if (spinner) spinner.style.display = 'none';
+                const status = document.getElementById('eurika-status');
+                if (status) status.textContent = '⏸️ Paused';
+                return;
+            }
+
+            if (isSurveyComplete()) {
+                console.log('✅ Survey finished – auto-stopping.');
+                isRunning = false;
+                stopRequested = false;
+                const toggle = document.getElementById('eurika-toggle');
+                if (toggle) {
+                    toggle.textContent = '▶️ Start';
+                    toggle.style.background = '#3b82f6';
+                }
+                const spinner = document.getElementById('eurika-spinner');
+                if (spinner) spinner.style.display = 'none';
+                const status = document.getElementById('eurika-status');
+                if (status) status.textContent = '✅ Complete';
+                if (typeof GM_notification !== 'undefined') {
+                    GM_notification('Survey completed!', 'EURIKA Auto');
+                }
+                delete window._eurikaRunner;
+                return;
+            }
+
+            const fieldset = document.querySelector('fieldset:not([style*="display: none"])');
+            if (!fieldset) {
+                console.log('✅ No visible question – survey done.');
+                isRunning = false;
+                stopRequested = false;
+                const toggle = document.getElementById('eurika-toggle');
+                if (toggle) {
+                    toggle.textContent = '▶️ Start';
+                    toggle.style.background = '#3b82f6';
+                }
+                const spinner = document.getElementById('eurika-spinner');
+                if (spinner) spinner.style.display = 'none';
+                const status = document.getElementById('eurika-status');
+                if (status) status.textContent = '✅ Complete';
+                delete window._eurikaRunner;
+                return;
+            }
+
+            await fillQuestion(fieldset);
+            currentQuestionCount++;
+            const counter = document.getElementById('eurika-counter');
+            if (counter) counter.textContent = `Questions: ${currentQuestionCount}`;
+
+            await new Promise(r => setTimeout(r, 500));
+
+            if (!clickNext()) {
+                console.log('🚀 No "Next" button – submitted.');
+                isRunning = false;
+                stopRequested = false;
+                const toggle = document.getElementById('eurika-toggle');
+                if (toggle) {
+                    toggle.textContent = '▶️ Start';
+                    toggle.style.background = '#3b82f6';
+                }
+                const spinner = document.getElementById('eurika-spinner');
+                if (spinner) spinner.style.display = 'none';
+                const status = document.getElementById('eurika-status');
+                if (status) status.textContent = '✅ Complete';
+                delete window._eurikaRunner;
+                return;
+            }
+
+            await new Promise(r => setTimeout(r, 1500));
+
+            if (isRunning && !stopRequested) {
+                setTimeout(() => {
+                    if (window._eurikaRunner) window._eurikaRunner();
+                }, 100);
+            } else {
+                isRunning = false;
+                const toggle = document.getElementById('eurika-toggle');
+                if (toggle) {
+                    toggle.textContent = '▶️ Start';
+                    toggle.style.background = '#3b82f6';
+                }
+                const spinner = document.getElementById('eurika-spinner');
+                if (spinner) spinner.style.display = 'none';
+                const status = document.getElementById('eurika-status');
+                if (status) status.textContent = '⏸️ Paused';
+                delete window._eurikaRunner;
+            }
+        };
+
+        window._eurikaRunner();
+    }
+
+    // ---- INIT ----
+    function init() {
+        createUI();
+        // Show a welcome toast
+        const path = window.location.pathname;
+        if (path.includes('/surveys')) {
+            showToast('📋 Click "Step 1: Select Survey" to choose a survey.', '#8b5cf6');
+        } else if (path.includes('/survey')) {
+            const flag = sessionStorage.getItem('eurika_survey_selected');
+            if (flag === 'true') {
+                showToast('✅ Survey ready! Click "Step 2: Start Auto-Fill" to begin.', '#22c55e');
+            } else {
+                showToast('⚠️ Please go to /surveys and use Step 1 first.', '#f59e0b');
+            }
+        }
+    }
+
+    // Toast helper for global use
+    function showToast(message, color = '#22c55e') {
+        const toast = document.createElement('div');
+        toast.style.cssText = `
+            position: fixed;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: ${color};
+            color: white;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-family: 'Segoe UI', sans-serif;
+            font-size: 16px;
+            font-weight: bold;
+            z-index: 999999;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
+            opacity: 0;
+            transition: opacity 0.5s;
+        `;
+        toast.textContent = message;
+        document.body.appendChild(toast);
+        requestAnimationFrame(() => { toast.style.opacity = '1'; });
+        setTimeout(() => {
+            toast.style.opacity = '0';
+            setTimeout(() => toast.remove(), 500);
+        }, 4000);
+    }
+
+    // ---- START ----
+    if (document.readyState === 'complete') {
+        init();
+    } else {
+        window.addEventListener('load', init);
+    }
+})();
