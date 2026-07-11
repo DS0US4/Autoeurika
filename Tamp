@@ -1,11 +1,10 @@
 // ==UserScript==
-// @name         EURIKA Surveys Automated v1.2
+// @name         EURIKA Surveys Automated
 // @namespace    http://tampermonkey.net/
-// @version      2026-07-11
-// @description  Two‑step survey selector + auto‑filler (logic + web search)
+// @version      2.0
+// @description  Auto‑fill surveys with logic + web search (simplified UI)
 // @author       You
-// @match        https://eurekasurveys.com/surveys*
-// @match        https://eurekasurveys.com/survey*
+// @match        https://eurekasurveys.com/*
 // @icon         https://www.google.com/s2/favicons?domain=eurekasurveys.com
 // @grant        GM_xmlhttpRequest
 // @grant        GM_notification
@@ -272,7 +271,12 @@
         return false;
     }
 
-    // ---- UI CREATION ----
+    function isSurveyPage() {
+        // Check for presence of survey form or fieldset
+        return document.querySelector('form#question_form, fieldset') !== null;
+    }
+
+    // ---- SIMPLIFIED UI ----
     function createUI() {
         const overlay = document.createElement('div');
         overlay.id = 'eurika-automator';
@@ -291,54 +295,18 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
-            min-width: 200px;
+            min-width: 180px;
             border: 1px solid #334155;
             opacity: 1;
         `;
 
-        // ---- STEP 1 & 2 BUTTONS ----
-        const stepRow = document.createElement('div');
-        stepRow.style.cssText = 'display: flex; gap: 8px; width: 100%;';
+        // Title
+        const title = document.createElement('div');
+        title.textContent = '🤖 EURIKA Auto';
+        title.style.cssText = 'font-weight: bold; font-size: 16px; color: #60a5fa; text-align: center;';
+        overlay.appendChild(title);
 
-        const step1Btn = document.createElement('button');
-        step1Btn.id = 'eurika-step1';
-        step1Btn.textContent = '🔹 Step 1: Select Survey';
-        step1Btn.style.cssText = `
-            background: #8b5cf6;
-            color: white;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: pointer;
-            font-size: 12px;
-            flex: 1;
-        `;
-        step1Btn.addEventListener('mouseenter', () => { step1Btn.style.background = '#7c3aed'; });
-        step1Btn.addEventListener('mouseleave', () => { step1Btn.style.background = '#8b5cf6'; });
-
-        const step2Btn = document.createElement('button');
-        step2Btn.id = 'eurika-step2';
-        step2Btn.textContent = '🔸 Step 2: Start Auto-Fill';
-        step2Btn.style.cssText = `
-            background: #64748b;
-            color: white;
-            border: none;
-            padding: 6px 12px;
-            border-radius: 6px;
-            font-weight: bold;
-            cursor: not-allowed;
-            font-size: 12px;
-            flex: 1;
-            opacity: 0.6;
-        `;
-        step2Btn.disabled = true;
-
-        stepRow.appendChild(step1Btn);
-        stepRow.appendChild(step2Btn);
-        overlay.appendChild(stepRow);
-
-        // ---- STATUS & SPINNER ----
+        // Status row with spinner
         const statusRow = document.createElement('div');
         statusRow.style.cssText = 'display: flex; align-items: center; gap: 10px; width: 100%;';
 
@@ -356,36 +324,39 @@
 
         const statusText = document.createElement('span');
         statusText.id = 'eurika-status';
-        statusText.textContent = '⏸️ Idle';
+        statusText.textContent = isSurveyPage() ? '⏸️ Paused' : '⛔ Not a survey';
 
         statusRow.appendChild(spinner);
         statusRow.appendChild(statusText);
         overlay.appendChild(statusRow);
 
-        // ---- START/STOP & RESET ----
+        // Control buttons
         const controlRow = document.createElement('div');
         controlRow.style.cssText = 'display: flex; gap: 8px; width: 100%;';
 
         const toggleBtn = document.createElement('button');
         toggleBtn.id = 'eurika-toggle';
-        toggleBtn.textContent = '▶️ Start';
+        toggleBtn.textContent = isSurveyPage() ? '▶️ Start' : '⛔ Disabled';
         toggleBtn.style.cssText = `
-            background: #3b82f6;
+            background: ${isSurveyPage() ? '#3b82f6' : '#475569'};
             color: white;
             border: none;
             padding: 6px 16px;
             border-radius: 6px;
             font-weight: bold;
-            cursor: pointer;
+            cursor: ${isSurveyPage() ? 'pointer' : 'not-allowed'};
             font-size: 13px;
             flex: 1;
+            transition: background 0.2s;
         `;
-        toggleBtn.addEventListener('mouseenter', () => {
-            toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#2563eb' : '#dc2626';
-        });
-        toggleBtn.addEventListener('mouseleave', () => {
-            toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#3b82f6' : '#ef4444';
-        });
+        if (isSurveyPage()) {
+            toggleBtn.addEventListener('mouseenter', () => {
+                toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#2563eb' : '#dc2626';
+            });
+            toggleBtn.addEventListener('mouseleave', () => {
+                toggleBtn.style.background = toggleBtn.textContent.includes('Start') ? '#3b82f6' : '#ef4444';
+            });
+        }
 
         const resetBtn = document.createElement('button');
         resetBtn.textContent = '🔄 Reset';
@@ -398,6 +369,7 @@
             cursor: pointer;
             font-size: 13px;
             flex: 0.5;
+            transition: background 0.2s;
         `;
         resetBtn.addEventListener('mouseenter', () => { resetBtn.style.background = '#64748b'; });
         resetBtn.addEventListener('mouseleave', () => { resetBtn.style.background = '#475569'; });
@@ -406,7 +378,7 @@
         controlRow.appendChild(resetBtn);
         overlay.appendChild(controlRow);
 
-        // ---- COUNTER ----
+        // Counter
         const counter = document.createElement('div');
         counter.id = 'eurika-counter';
         counter.style.cssText = 'font-size: 12px; color: #94a3b8; align-self: flex-start;';
@@ -415,7 +387,7 @@
 
         document.body.appendChild(overlay);
 
-        // ---- CSS for spinner ----
+        // Inject spin keyframes
         if (!document.getElementById('eurika-spin-style')) {
             const style = document.createElement('style');
             style.id = 'eurika-spin-style';
@@ -429,75 +401,25 @@
         }
 
         // ---- EVENT HANDLERS ----
-        // Step 1: Select Survey (only on /surveys page)
-        step1Btn.addEventListener('click', function() {
-            if (window.location.pathname.includes('/surveys')) {
-                // Find the chevron arrow
-                const arrow = document.querySelector('img[src*="chevron_right"], svg[src*="chevron_right"]');
-                if (arrow) {
-                    arrow.click();
-                    // Store flag that we've selected a survey
-                    sessionStorage.setItem('eurika_survey_selected', 'true');
-                    // Show a toast
-                    showToast('🔄 Survey selected! Redirecting...', '#8b5cf6');
-                    // The page will redirect; the script will reload.
-                } else {
-                    showToast('❌ Arrow not found on this page.', '#ef4444');
-                }
-            } else {
-                showToast('ℹ️ Please go to the /surveys page first.', '#f59e0b');
-            }
-        });
-
-        // Step 2: Start Auto-Fill (on survey page after step1)
-        step2Btn.addEventListener('click', function() {
-            if (isRunning) {
-                // If already running, do nothing
+        toggleBtn.addEventListener('click', function() {
+            if (!isSurveyPage()) {
+                showToast('⛔ No survey detected on this page.', '#ef4444');
                 return;
             }
-            // Start the auto-filler
-            if (window._eurikaRunner && typeof window._eurikaRunner === 'function') {
-                stopRequested = false;
-                isRunning = true;
-                toggleBtn.textContent = '⏹️ Stop';
-                toggleBtn.style.background = '#ef4444';
-                spinner.style.display = 'block';
-                statusText.textContent = '▶️ Running...';
-                window._eurikaRunner();
-            } else {
-                // First run
-                stopRequested = false;
-                isRunning = true;
-                toggleBtn.textContent = '⏹️ Stop';
-                toggleBtn.style.background = '#ef4444';
-                spinner.style.display = 'block';
-                statusText.textContent = '▶️ Running...';
-                runAutoFiller();
-            }
-        });
-
-        // Toggle (Start/Stop) – this will be used for pausing during auto-fill
-        toggleBtn.addEventListener('click', function() {
             if (isRunning) {
-                // Stop
+                // Pause/Stop
                 stopRequested = true;
                 toggleBtn.textContent = '⏳ Stopping...';
                 toggleBtn.style.background = '#f59e0b';
             } else {
-                // Start (only if we're on a survey page and step2 was already activated?)
-                // Actually, the toggle is meant to start/stop the running loop.
-                // We'll check if we are on a survey page and we have a fieldset.
-                const fieldset = document.querySelector('fieldset:not([style*="display: none"])');
-                if (!fieldset) {
-                    showToast('❌ No survey loaded. Use Step 1 & 2 first.', '#ef4444');
-                    return;
-                }
+                // Start
                 stopRequested = false;
                 isRunning = true;
                 toggleBtn.textContent = '⏹️ Stop';
                 toggleBtn.style.background = '#ef4444';
                 spinner.style.display = 'block';
                 statusText.textContent = '▶️ Running...';
+                // Start the runner
                 if (window._eurikaRunner && typeof window._eurikaRunner === 'function') {
                     window._eurikaRunner();
                 } else {
@@ -506,9 +428,7 @@
             }
         });
 
-        // Reset
         resetBtn.addEventListener('click', function() {
-            // Stop everything, reset counter and UI
             if (isRunning) {
                 stopRequested = true;
                 // Wait a bit then reset
@@ -522,18 +442,15 @@
             isRunning = false;
             stopRequested = false;
             currentQuestionCount = 0;
-            toggleBtn.textContent = '▶️ Start';
-            toggleBtn.style.background = '#3b82f6';
+            toggleBtn.textContent = isSurveyPage() ? '▶️ Start' : '⛔ Disabled';
+            toggleBtn.style.background = isSurveyPage() ? '#3b82f6' : '#475569';
             spinner.style.display = 'none';
-            statusText.textContent = '⏸️ Idle';
+            statusText.textContent = isSurveyPage() ? '⏸️ Paused' : '⛔ Not a survey';
             counter.textContent = 'Questions: 0';
-            // Reset step2 button to disabled if not on survey page? We'll keep it as is.
-            // Also clear session flag? Not needed, but we can if user wants.
             delete window._eurikaRunner;
-            // Also maybe reload? No.
         }
 
-        // ---- TOAST FUNCTION ----
+        // ---- TOAST function ----
         function showToast(message, color = '#22c55e') {
             const toast = document.createElement('div');
             toast.style.cssText = `
@@ -562,62 +479,20 @@
             }, 4000);
         }
 
-        // Expose functions globally for debugging
-        window._eurikaUI = { toggleBtn, statusText, spinner, counter, step1Btn, step2Btn, resetUI, showToast };
+        // Expose reset to console for debugging
+        window._eurikaUI = { resetUI, showToast };
 
-        // ---- INITIAL STATE BASED ON PAGE ----
-        const currentPath = window.location.pathname;
-        if (currentPath.includes('/surveys')) {
-            // On survey list page: enable step1, disable step2, hide toggle? we keep toggle but disabled?
-            step2Btn.disabled = true;
-            step2Btn.style.cursor = 'not-allowed';
-            step2Btn.style.opacity = '0.6';
-            statusText.textContent = '📋 Select a survey';
-            // Hide the toggle button? we can keep it but grayed out.
-            toggleBtn.disabled = true;
-            toggleBtn.style.opacity = '0.5';
-            toggleBtn.style.cursor = 'not-allowed';
-            // Also hide spinner
-            spinner.style.display = 'none';
-        } else if (currentPath.includes('/survey')) {
-            // On survey page: check if we have the flag
-            const flag = sessionStorage.getItem('eurika_survey_selected');
-            if (flag === 'true') {
-                // Enable step2, disable step1
-                step1Btn.disabled = true;
-                step1Btn.style.opacity = '0.5';
-                step1Btn.style.cursor = 'not-allowed';
-                step2Btn.disabled = false;
-                step2Btn.style.cursor = 'pointer';
-                step2Btn.style.opacity = '1';
-                step2Btn.style.background = '#22c55e';
-                statusText.textContent = '✅ Survey ready – click Step 2';
-                // Enable toggle
-                toggleBtn.disabled = false;
-                toggleBtn.style.opacity = '1';
-                toggleBtn.style.cursor = 'pointer';
-                // Clear flag after use? We'll keep it for this session.
-                // Optionally auto-start step2? But user wants button.
-            } else {
-                // No flag: maybe user arrived directly
-                step1Btn.disabled = true;
-                step1Btn.style.opacity = '0.5';
-                step1Btn.style.cursor = 'not-allowed';
-                step2Btn.disabled = true;
-                step2Btn.style.opacity = '0.5';
-                step2Btn.style.cursor = 'not-allowed';
-                toggleBtn.disabled = true;
-                toggleBtn.style.opacity = '0.5';
-                toggleBtn.style.cursor = 'not-allowed';
-                statusText.textContent = '⚠️ Please use Step 1 first';
-                showToast('⚠️ Go to /surveys and use "Step 1" first.', '#f59e0b');
-            }
+        // Show initial toast if on survey page
+        if (isSurveyPage()) {
+            showToast('✅ Survey detected! Click "Start" to begin.', '#22c55e');
+        } else {
+            showToast('⛔ No survey found on this page.', '#ef4444');
         }
 
-        return { step1Btn, step2Btn, toggleBtn, statusText, spinner, counter };
+        return { toggleBtn, statusText, spinner, counter, resetUI };
     }
 
-    // ---- MAIN AUTO-FILLER LOOP (stoppable) ----
+    // ---- MAIN AUTO-FILLER (stoppable) ----
     async function runAutoFiller() {
         if (window._eurikaRunner) return;
 
@@ -626,152 +501,10 @@
                 isRunning = false;
                 const toggle = document.getElementById('eurika-toggle');
                 if (toggle) {
-                    toggle.textContent = '▶️ Start';
-                    toggle.style.background = '#3b82f6';
+                    toggle.textContent = isSurveyPage() ? '▶️ Start' : '⛔ Disabled';
+                    toggle.style.background = isSurveyPage() ? '#3b82f6' : '#475569';
                 }
                 const spinner = document.getElementById('eurika-spinner');
                 if (spinner) spinner.style.display = 'none';
                 const status = document.getElementById('eurika-status');
-                if (status) status.textContent = '⏸️ Paused';
-                return;
-            }
-
-            if (isSurveyComplete()) {
-                console.log('✅ Survey finished – auto-stopping.');
-                isRunning = false;
-                stopRequested = false;
-                const toggle = document.getElementById('eurika-toggle');
-                if (toggle) {
-                    toggle.textContent = '▶️ Start';
-                    toggle.style.background = '#3b82f6';
-                }
-                const spinner = document.getElementById('eurika-spinner');
-                if (spinner) spinner.style.display = 'none';
-                const status = document.getElementById('eurika-status');
-                if (status) status.textContent = '✅ Complete';
-                if (typeof GM_notification !== 'undefined') {
-                    GM_notification('Survey completed!', 'EURIKA Auto');
-                }
-                delete window._eurikaRunner;
-                return;
-            }
-
-            const fieldset = document.querySelector('fieldset:not([style*="display: none"])');
-            if (!fieldset) {
-                console.log('✅ No visible question – survey done.');
-                isRunning = false;
-                stopRequested = false;
-                const toggle = document.getElementById('eurika-toggle');
-                if (toggle) {
-                    toggle.textContent = '▶️ Start';
-                    toggle.style.background = '#3b82f6';
-                }
-                const spinner = document.getElementById('eurika-spinner');
-                if (spinner) spinner.style.display = 'none';
-                const status = document.getElementById('eurika-status');
-                if (status) status.textContent = '✅ Complete';
-                delete window._eurikaRunner;
-                return;
-            }
-
-            await fillQuestion(fieldset);
-            currentQuestionCount++;
-            const counter = document.getElementById('eurika-counter');
-            if (counter) counter.textContent = `Questions: ${currentQuestionCount}`;
-
-            await new Promise(r => setTimeout(r, 500));
-
-            if (!clickNext()) {
-                console.log('🚀 No "Next" button – submitted.');
-                isRunning = false;
-                stopRequested = false;
-                const toggle = document.getElementById('eurika-toggle');
-                if (toggle) {
-                    toggle.textContent = '▶️ Start';
-                    toggle.style.background = '#3b82f6';
-                }
-                const spinner = document.getElementById('eurika-spinner');
-                if (spinner) spinner.style.display = 'none';
-                const status = document.getElementById('eurika-status');
-                if (status) status.textContent = '✅ Complete';
-                delete window._eurikaRunner;
-                return;
-            }
-
-            await new Promise(r => setTimeout(r, 1500));
-
-            if (isRunning && !stopRequested) {
-                setTimeout(() => {
-                    if (window._eurikaRunner) window._eurikaRunner();
-                }, 100);
-            } else {
-                isRunning = false;
-                const toggle = document.getElementById('eurika-toggle');
-                if (toggle) {
-                    toggle.textContent = '▶️ Start';
-                    toggle.style.background = '#3b82f6';
-                }
-                const spinner = document.getElementById('eurika-spinner');
-                if (spinner) spinner.style.display = 'none';
-                const status = document.getElementById('eurika-status');
-                if (status) status.textContent = '⏸️ Paused';
-                delete window._eurikaRunner;
-            }
-        };
-
-        window._eurikaRunner();
-    }
-
-    // ---- INIT ----
-    function init() {
-        createUI();
-        // Show a welcome toast
-        const path = window.location.pathname;
-        if (path.includes('/surveys')) {
-            showToast('📋 Click "Step 1: Select Survey" to choose a survey.', '#8b5cf6');
-        } else if (path.includes('/survey')) {
-            const flag = sessionStorage.getItem('eurika_survey_selected');
-            if (flag === 'true') {
-                showToast('✅ Survey ready! Click "Step 2: Start Auto-Fill" to begin.', '#22c55e');
-            } else {
-                showToast('⚠️ Please go to /surveys and use Step 1 first.', '#f59e0b');
-            }
-        }
-    }
-
-    // Toast helper for global use
-    function showToast(message, color = '#22c55e') {
-        const toast = document.createElement('div');
-        toast.style.cssText = `
-            position: fixed;
-            top: 20px;
-            left: 50%;
-            transform: translateX(-50%);
-            background: ${color};
-            color: white;
-            padding: 12px 24px;
-            border-radius: 8px;
-            font-family: 'Segoe UI', sans-serif;
-            font-size: 16px;
-            font-weight: bold;
-            z-index: 999999;
-            box-shadow: 0 4px 12px rgba(0,0,0,0.3);
-            opacity: 0;
-            transition: opacity 0.5s;
-        `;
-        toast.textContent = message;
-        document.body.appendChild(toast);
-        requestAnimationFrame(() => { toast.style.opacity = '1'; });
-        setTimeout(() => {
-            toast.style.opacity = '0';
-            setTimeout(() => toast.remove(), 500);
-        }, 4000);
-    }
-
-    // ---- START ----
-    if (document.readyState === 'complete') {
-        init();
-    } else {
-        window.addEventListener('load', init);
-    }
-})();
+                if (status) status.textContent = isSurveyPa
