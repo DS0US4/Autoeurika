@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         EURIKA Surveys Automated
 // @namespace    http://tampermonkey.net/
-// @version      2.0
-// @description  Auto‑fill surveys with logic + web search (simplified UI)
+// @version      2.2
+// @description  Auto-fill surveys with logic + web search + sliders
 // @author       You
 // @match        https://eurekasurveys.com/*
 // @icon         https://www.google.com/s2/favicons?domain=eurekasurveys.com
@@ -14,7 +14,7 @@
 (function() {
     'use strict';
 
-    // ---- CONFIG ----
+    // ===== CONFIG =====
     const MC_DELAY_MIN = 1000;
     const MC_DELAY_MAX = 2000;
     const TEXT_DELAY_MIN = 2000;
@@ -22,12 +22,12 @@
     const SEARCH_TIMEOUT = 5000;
     const RANDOM_FALLBACK = true;
 
-    // ---- STATE ----
+    // ===== STATE =====
     let isRunning = false;
     let stopRequested = false;
     let currentQuestionCount = 0;
 
-    // ---- HELPERS (same as before) ----
+    // ===== HELPERS =====
     function clean(text) {
         return text ? text.replace(/\s+/g, ' ').trim() : '';
     }
@@ -52,10 +52,12 @@
         if (fieldset.querySelector('input[type="radio"]')) return 'radio';
         if (fieldset.querySelector('input[type="checkbox"]')) return 'checkbox';
         if (fieldset.querySelector('input[type="text"], textarea')) return 'text';
+        if (fieldset.querySelector('input[type="range"]')) return 'range';  // <-- NEW
         if (fieldset.querySelector('select')) return 'select';
         return 'unknown';
     }
 
+    // ===== LOCAL LOGIC (attention checks, math, facts) =====
     function localLogic(question, options) {
         const lower = question.toLowerCase();
         const patterns = [
@@ -108,6 +110,7 @@
         return null;
     }
 
+    // ===== WEB SEARCH (DuckDuckGo) =====
     function webSearch(query) {
         return new Promise((resolve, reject) => {
             const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&skip_disambig=1`;
@@ -133,6 +136,7 @@
         });
     }
 
+    // ===== GET LOGICAL ANSWER =====
     async function getLogicalAnswer(question, options, inputType) {
         const local = localLogic(question, options);
         if (local) return local;
@@ -178,12 +182,46 @@
         return null;
     }
 
+    // ===== SLIDER HELPER =====
+    function pickSliderValue(min, max, step) {
+        // Pick a value between 20% and 80% of the range (human-like)
+        const range = max - min;
+        const low = min + range * 0.2;
+        const high = min + range * 0.8;
+        // Random between low and high, rounded to step
+        const raw = low + Math.random() * (high - low);
+        const stepped = Math.round(raw / step) * step;
+        return Math.min(max, Math.max(min, stepped));
+    }
+
+    // ===== FILL QUESTION =====
     async function fillQuestion(fieldset) {
         const qText = getQuestionText(fieldset);
         const options = getOptionLabels(fieldset);
         const type = getInputType(fieldset);
         console.log(`📝 ${qText.slice(0, 70)}...`);
 
+        // For range sliders, we don't need a logical answer from search
+        if (type === 'range') {
+            const slider = fieldset.querySelector('input[type="range"]');
+            if (slider) {
+                const min = parseFloat(slider.min) || 0;
+                const max = parseFloat(slider.max) || 100;
+                const step = parseFloat(slider.step) || 1;
+                const value = pickSliderValue(min, max, step);
+                slider.value = value;
+                // Dispatch events to update any UI
+                slider.dispatchEvent(new Event('input', { bubbles: true }));
+                slider.dispatchEvent(new Event('change', { bubbles: true }));
+                console.log(`   🎚️ Slider set to: ${value}`);
+                const delay = MC_DELAY_MIN + Math.random() * (MC_DELAY_MAX - MC_DELAY_MIN);
+                await new Promise(r => setTimeout(r, delay));
+                return;
+            }
+            return; // fallback if no slider found
+        }
+
+        // For other types, use the existing logic
         const result = await getLogicalAnswer(qText, options, type);
         if (!result) {
             console.warn('⚠️ No answer found, skipping.');
@@ -253,6 +291,7 @@
         }
     }
 
+    // ===== NAVIGATE =====
     function clickNext() {
         const btn = document.querySelector('button#next, button[type="submit"], .next-btn, .continue-btn');
         if (btn) {
@@ -272,11 +311,10 @@
     }
 
     function isSurveyPage() {
-        // Check for presence of survey form or fieldset
-        return document.querySelector('form#question_form, fieldset') !== null;
+        return !!document.querySelector('form#question_form, fieldset');
     }
 
-    // ---- SIMPLIFIED UI ----
+    // ===== UI =====
     function createUI() {
         const overlay = document.createElement('div');
         overlay.id = 'eurika-automator';
@@ -300,13 +338,11 @@
             opacity: 1;
         `;
 
-        // Title
         const title = document.createElement('div');
         title.textContent = '🤖 EURIKA Auto';
         title.style.cssText = 'font-weight: bold; font-size: 16px; color: #60a5fa; text-align: center;';
         overlay.appendChild(title);
 
-        // Status row with spinner
         const statusRow = document.createElement('div');
         statusRow.style.cssText = 'display: flex; align-items: center; gap: 10px; width: 100%;';
 
@@ -330,7 +366,6 @@
         statusRow.appendChild(statusText);
         overlay.appendChild(statusRow);
 
-        // Control buttons
         const controlRow = document.createElement('div');
         controlRow.style.cssText = 'display: flex; gap: 8px; width: 100%;';
 
@@ -378,7 +413,6 @@
         controlRow.appendChild(resetBtn);
         overlay.appendChild(controlRow);
 
-        // Counter
         const counter = document.createElement('div');
         counter.id = 'eurika-counter';
         counter.style.cssText = 'font-size: 12px; color: #94a3b8; align-self: flex-start;';
@@ -387,7 +421,6 @@
 
         document.body.appendChild(overlay);
 
-        // Inject spin keyframes
         if (!document.getElementById('eurika-spin-style')) {
             const style = document.createElement('style');
             style.id = 'eurika-spin-style';
@@ -407,19 +440,16 @@
                 return;
             }
             if (isRunning) {
-                // Pause/Stop
                 stopRequested = true;
                 toggleBtn.textContent = '⏳ Stopping...';
                 toggleBtn.style.background = '#f59e0b';
             } else {
-                // Start
                 stopRequested = false;
                 isRunning = true;
                 toggleBtn.textContent = '⏹️ Stop';
                 toggleBtn.style.background = '#ef4444';
                 spinner.style.display = 'block';
                 statusText.textContent = '▶️ Running...';
-                // Start the runner
                 if (window._eurikaRunner && typeof window._eurikaRunner === 'function') {
                     window._eurikaRunner();
                 } else {
@@ -431,7 +461,6 @@
         resetBtn.addEventListener('click', function() {
             if (isRunning) {
                 stopRequested = true;
-                // Wait a bit then reset
                 setTimeout(() => resetUI(), 500);
             } else {
                 resetUI();
@@ -450,7 +479,6 @@
             delete window._eurikaRunner;
         }
 
-        // ---- TOAST function ----
         function showToast(message, color = '#22c55e') {
             const toast = document.createElement('div');
             toast.style.cssText = `
@@ -472,39 +500,4 @@
             `;
             toast.textContent = message;
             document.body.appendChild(toast);
-            requestAnimationFrame(() => { toast.style.opacity = '1'; });
-            setTimeout(() => {
-                toast.style.opacity = '0';
-                setTimeout(() => toast.remove(), 500);
-            }, 4000);
-        }
-
-        // Expose reset to console for debugging
-        window._eurikaUI = { resetUI, showToast };
-
-        // Show initial toast if on survey page
-        if (isSurveyPage()) {
-            showToast('✅ Survey detected! Click "Start" to begin.', '#22c55e');
-        } else {
-            showToast('⛔ No survey found on this page.', '#ef4444');
-        }
-
-        return { toggleBtn, statusText, spinner, counter, resetUI };
-    }
-
-    // ---- MAIN AUTO-FILLER (stoppable) ----
-    async function runAutoFiller() {
-        if (window._eurikaRunner) return;
-
-        window._eurikaRunner = async function() {
-            if (!isRunning || stopRequested) {
-                isRunning = false;
-                const toggle = document.getElementById('eurika-toggle');
-                if (toggle) {
-                    toggle.textContent = isSurveyPage() ? '▶️ Start' : '⛔ Disabled';
-                    toggle.style.background = isSurveyPage() ? '#3b82f6' : '#475569';
-                }
-                const spinner = document.getElementById('eurika-spinner');
-                if (spinner) spinner.style.display = 'none';
-                const status = document.getElementById('eurika-status');
-                if (status) status.textContent = isSurveyPa
+            requestAnimationFrame(()
